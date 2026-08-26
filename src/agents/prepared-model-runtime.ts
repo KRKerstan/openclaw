@@ -70,6 +70,7 @@ let gatewayLifecycleActive = false;
 let refreshTail: Promise<void> = Promise.resolve();
 let refreshRequestEpoch = 0;
 let pendingModelRuntimeReplacement: PreparedModelRuntimeReplacement | undefined;
+let catalogGenerationRecoveries = new WeakMap<PreparedModelRuntimeSnapshot, Promise<void>>();
 type AuthMutationEvent = { agentDir?: string; affectsInheritedStores: boolean };
 const pendingAuthMutations: AuthMutationEvent[] = [];
 
@@ -408,6 +409,74 @@ export function markPreparedModelRuntimeSnapshotsStale(
   return pendingModelRuntimeReplacement?.gateId;
 }
 
+/** Rebuilds the configured owner whose deferred catalog no longer matches its plugin generation. */
+export async function replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(
+  snapshot: PreparedModelRuntimeSnapshot,
+): Promise<boolean> {
+  const activeRecovery = catalogGenerationRecoveries.get(snapshot);
+  if (activeRecovery) {
+    await activeRecovery;
+    return true;
+  }
+  const owner = [...owners.values()].find((candidate) => candidate.snapshot === snapshot);
+  if (!owner || owner.provenance !== "configured") {
+    return false;
+  }
+  const pendingReplacement = pendingModelRuntimeReplacement;
+  if (pendingReplacement) {
+    await pendingReplacement.promise;
+    return true;
+  }
+
+  const key = ownerKey(owner.input);
+  const replacement = createPreparedModelRuntimeReplacement();
+  pendingModelRuntimeReplacement = replacement;
+  const staleError = new Error(
+    `prepared model runtime catalog generation was invalid for ${owner.input.agentDir}`,
+  );
+  owner.generation += 1;
+  owner.needsRefresh = true;
+  owner.refreshError = staleError;
+  owner.pluginGeneration = undefined;
+  if (owner.input.agentId) {
+    replyDispatchPublication.remove(new Set([owner.input.agentId]));
+  }
+  notifyPreparedModelRuntimePublication({ phase: "invalidated" });
+
+  const recovery = enqueuePreparedModelRuntimePublication(async () => {
+    if (owners.get(key) !== owner || owner.snapshot !== snapshot) {
+      return;
+    }
+    await publishPreparedModelRuntimeOwnerBatch({
+      entries: [{ owner, input: owner.input }],
+      owners,
+      agentBuildCompletions,
+      buildTimeoutMs: modelRuntimeBuildTimeoutMs,
+    });
+    replyDispatchPublication.rebuild(owners.values());
+  });
+  // Retain the settled promise under the discarded snapshot. A late reader that already captured
+  // that generation can then join the same result instead of surfacing a stale mismatch.
+  catalogGenerationRecoveries.set(snapshot, recovery);
+  try {
+    await recovery;
+    if (pendingModelRuntimeReplacement === replacement) {
+      pendingModelRuntimeReplacement = undefined;
+      replacement.resolve();
+      notifyPreparedModelRuntimePublication({ phase: "published" });
+    }
+  } catch (error) {
+    const refreshError = toStringifiedError(error);
+    if (pendingModelRuntimeReplacement === replacement) {
+      pendingModelRuntimeReplacement = undefined;
+      replacement.reject(refreshError);
+      notifyPreparedModelRuntimePublication({ phase: "failed", error: refreshError });
+    }
+    throw refreshError;
+  }
+  return true;
+}
+
 /** Rejects readers waiting for a replacement when its owning reload cannot continue. */
 export function rejectPendingPreparedModelRuntimeReplacement(
   gateId: PreparedModelRuntimeReplacementGateId | undefined,
@@ -676,6 +745,7 @@ function resetPreparedModelRuntimeSnapshotsForTest(): void {
   refreshTail = Promise.resolve();
   refreshRequestEpoch = 0;
   pendingAuthMutations.length = 0;
+  catalogGenerationRecoveries = new WeakMap();
   replyDispatchPublication.clear();
   resetPreparedModelRuntimePublicationListenersForTest();
   modelRuntimeBuildTimeoutMs = DEFAULT_MODEL_RUNTIME_BUILD_TIMEOUT_MS;

@@ -20,6 +20,7 @@ import {
   setPreparedModelRuntimeAuthLoader,
   setPreparedModelRuntimeAuthStore,
 } from "./prepared-model-runtime-auth.js";
+import { PreparedModelCatalogGenerationInvalidError } from "./prepared-model-runtime.errors.js";
 import { isPreparedModelCatalogFull } from "./prepared-model-runtime.full-catalog.js";
 import {
   acquireAgentRunPreparedModelRuntime,
@@ -29,6 +30,7 @@ import {
   prepareModelRuntimeSnapshot,
   PreparedModelRuntimeOwnerNotPublishedError,
   preparedModelRuntimeConfigsMatch,
+  replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch,
   type PreparedModelRuntimeInput,
   type PreparedModelRuntimeSnapshot,
 } from "./prepared-model-runtime.js";
@@ -315,8 +317,28 @@ async function loadPreparedModelCatalogOwnerSnapshotWithPolicy(
   if (params.readOnly && !publishedReadOnlyOwner) {
     return snapshot;
   }
+  try {
+    return await materializeRequestedModelCatalog(
+      snapshot,
+      params.readOnly,
+      params.refreshFullCatalog,
+    );
+  } catch (error) {
+    if (
+      !(error instanceof PreparedModelCatalogGenerationInvalidError) ||
+      !(await replacePreparedModelRuntimeSnapshotAfterCatalogGenerationMismatch(snapshot))
+    ) {
+      throw error;
+    }
+  }
+  // Reacquire exactly once. A second generation mismatch escapes as the typed terminal error;
+  // arbitrary worker failures never enter this recovery path.
+  const replacement = await resolvePreparedModelCatalogOwnerSnapshotWithPolicy(
+    params,
+    configPolicy,
+  );
   return await materializeRequestedModelCatalog(
-    snapshot,
+    replacement,
     params.readOnly,
     params.refreshFullCatalog,
   );

@@ -14,7 +14,10 @@ import {
   type PreparedModelRuntimeAuthScope,
 } from "./prepared-model-runtime-auth.js";
 import type { PreparedModelRuntimeAgentFacts } from "./prepared-model-runtime.catalog-contract.js";
-import { PreparedModelRuntimePublicationSupersededError } from "./prepared-model-runtime.errors.js";
+import {
+  PreparedModelCatalogGenerationInvalidError,
+  PreparedModelRuntimePublicationSupersededError,
+} from "./prepared-model-runtime.errors.js";
 import { fingerprintPreparedRuntimeFacts } from "./prepared-model-runtime.facts.js";
 import { markPreparedModelCatalogFull } from "./prepared-model-runtime.full-catalog.js";
 import type { PreparedModelRuntimeInput } from "./prepared-model-runtime.types.js";
@@ -61,6 +64,7 @@ export type PreparedModelWorkerResult =
       authStore: AuthProfileStore;
       authModes: PreparedAgentCredentialModes;
     }>
+  | Readonly<{ status: "generation-invalid"; requestId: number; error: string }>
   | Readonly<{ status: "failed"; requestId: number; error: string }>;
 
 // Cold source/plugin loading can take well over a minute. Three minutes preserves exact full-view
@@ -218,6 +222,10 @@ export function createPreparedModelCatalogWorker(params: {
       clearTimeout(request.timeout);
       if (!params.isCurrent()) {
         const error = superseded();
+        request.reject(error);
+        stop(error);
+      } else if (message.status === "generation-invalid") {
+        const error = new PreparedModelCatalogGenerationInvalidError(message.error);
         request.reject(error);
         stop(error);
       } else if (message.status === "failed") {

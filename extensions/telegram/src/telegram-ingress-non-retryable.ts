@@ -8,6 +8,8 @@ import { isTelegramMessageDispatchReplayForgetError } from "./message-dispatch-d
 import { TelegramIngressPayloadError } from "./telegram-ingress-spool.payload.js";
 
 const MISSING_AGENT_HARNESS_ERROR_NAME = "MissingAgentHarnessError";
+const PREPARED_MODEL_CATALOG_GENERATION_INVALID_ERROR_NAME =
+  "PreparedModelCatalogGenerationInvalidError";
 const MISSING_AGENT_HARNESS_MESSAGE_RE = /Requested agent harness "[^"]+" is not registered\./u;
 // Only rejected recipients are permanent: other Telegram 403s can recover
 // after chat permissions change and must remain eligible for retry.
@@ -18,6 +20,7 @@ type TelegramIngressNonRetryableFailure = {
   reason:
     | "invalid-event"
     | "missing-agent-harness"
+    | "prepared-model-generation-invalid"
     | "dispatch-dedupe-rollback-failed"
     | "recipient-unreachable";
   message: string;
@@ -39,6 +42,9 @@ export function resolveTelegramIngressNonRetryableFailure(
       // A committed dispatch key that cannot be rolled back makes retry unsafe:
       // the next replay can be duplicate-suppressed and then deleted.
       return { reason: "dispatch-dedupe-rollback-failed", message };
+    }
+    if (readErrorName(candidate) === PREPARED_MODEL_CATALOG_GENERATION_INVALID_ERROR_NAME) {
+      return { reason: "prepared-model-generation-invalid", message };
     }
     if (TELEGRAM_UNREACHABLE_RECIPIENT_RE.test(message)) {
       return { reason: "recipient-unreachable", message };

@@ -35,6 +35,14 @@ import {
 } from "./prepared-model-runtime-auth.js";
 import { startSerializedSnapshotBuild } from "./prepared-model-runtime.build.js";
 import type { PreparedModelRuntimeAgentFacts } from "./prepared-model-runtime.catalog-contract.js";
+import { PreparedModelCatalogGenerationInvalidError } from "./prepared-model-runtime.errors.js";
+import {
+  prepareModelRuntimeSnapshot,
+  publishPreparedModelRuntimeSnapshot,
+  registerPreparedModelRuntimePublicationListener,
+  type PreparedModelRuntimeInput,
+} from "./prepared-model-runtime.js";
+import { resetPreparedModelRuntimeSnapshotsForTest } from "./prepared-model-runtime.test-support.js";
 import { AuthStorage } from "./sessions/auth-storage.js";
 
 const PROVIDER_ID = "worker-catalog-fixture";
@@ -54,6 +62,7 @@ const EXTERNAL_AUTH_PROFILE_ID = `${PROVIDER_ID}:external`;
 const EXTERNAL_AUTH_PATH_ENV = "OPENCLAW_WORKER_EXTERNAL_AUTH_PATH";
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
   afterEach(() => {
+    resetPreparedModelRuntimeSnapshotsForTest();
     clearRuntimeAuthProfileStoreSnapshots();
     closeOpenClawAgentDatabasesForTest();
     cleanup();
@@ -88,6 +97,7 @@ function writeFixturePlugin(params: {
   root: string;
   spinMs: number;
   pluginVersion?: string;
+  catalogError?: string;
 }): string {
   const pluginDir = path.join(params.root, "plugin");
   fs.mkdirSync(pluginDir, { recursive: true });
@@ -134,6 +144,7 @@ module.exports = {
       },
       catalog: {
         run(context) {
+          ${params.catalogError ? `throw new Error(${JSON.stringify(params.catalogError)});` : ""}
           const refOnlyApi = context.resolveProviderApiKey(${JSON.stringify(REF_ONLY_API_PROVIDER_ID)}).apiKey;
           const refOnlyToken = context.resolveProviderApiKey(${JSON.stringify(REF_ONLY_TOKEN_PROVIDER_ID)}).apiKey;
           const durableAuth = context.resolveProviderApiKey(${JSON.stringify(DURABLE_AUTH_PROVIDER_ID)}).apiKey;
@@ -311,6 +322,67 @@ async function createStaticSnapshot(
 
 async function waitForMarker(marker: string): Promise<void> {
   await expect.poll(() => fs.existsSync(marker), { timeout: 30_000 }).toBe(true);
+}
+
+async function createConfiguredModelsListHarness() {
+  const fixture = await createStaticSnapshot(0);
+  vi.stubEnv("OPENCLAW_WORKER_CATALOG_MARKER", fixture.marker);
+  const config = {
+    ...fixture.config,
+    agents: {
+      ...fixture.config.agents,
+      list: [
+        {
+          id: "main",
+          default: true,
+          agentDir: fixture.agentDir,
+          workspace: fixture.workspaceDir,
+        },
+      ],
+    },
+  } satisfies OpenClawConfig;
+  const input = {
+    agentId: "main",
+    agentDir: fixture.agentDir,
+    inheritedAuthDir: fixture.agentDir,
+    workspaceDir: fixture.workspaceDir,
+    config,
+    env: fixture.env,
+  } satisfies PreparedModelRuntimeInput;
+  const initialOwner = await publishPreparedModelRuntimeSnapshot(input, {
+    provenance: "configured",
+    catalogMode: "static",
+  });
+  const loadCatalog = async () =>
+    await loadGatewayModelCatalogSnapshot({
+      agentId: "main",
+      agentDir: fixture.agentDir,
+      workspaceDir: fixture.workspaceDir,
+      getConfig: () => config,
+      readOnly: false,
+    });
+  registerGatewayModelCatalogPrivateAccess(loadCatalog, {
+    loadDeferred: async () =>
+      await loadPreparedGatewayModelCatalogSnapshot({
+        agentId: "main",
+        agentDir: fixture.agentDir,
+        workspaceDir: fixture.workspaceDir,
+        getConfig: () => config,
+        readOnly: false,
+      }),
+    readPrepared: async () => undefined,
+  });
+  const context = {
+    getRuntimeConfig: () => config,
+    loadGatewayModelCatalogSnapshot: loadCatalog,
+    logGateway: { debug: () => undefined },
+  } as unknown as GatewayRequestContext;
+  return {
+    fixture,
+    initialOwner,
+    input,
+    listModels: async () => await buildModelsListResult({ context, params: { view: "all" } }),
+  };
 }
 
 describe("prepared model catalog worker boundary", () => {
@@ -761,6 +833,104 @@ describe("prepared model catalog worker boundary", () => {
       setTimeout(resolve, 100);
     });
     expect(fs.readFileSync(fixture.marker, "utf8")).toBe("start\n");
+  });
+
+  it("does not reacquire a configured owner when its worker generation still matches", async () => {
+    const harness = await createConfiguredModelsListHarness();
+    const phases: string[] = [];
+    const unregister = registerPreparedModelRuntimePublicationListener((event) => {
+      phases.push(event.phase);
+    });
+
+    const result = await harness.listModels().finally(unregister);
+
+    expect(await prepareModelRuntimeSnapshot(harness.input)).toBe(harness.initialOwner);
+    expect(phases).toEqual(["catalog-published"]);
+    expect(result.models).toContainEqual(
+      expect.objectContaining({ provider: PROVIDER_ID, id: "plugin-generation-v1" }),
+    );
+    expect(fs.readFileSync(harness.fixture.marker, "utf8")).toBe("start\ndone\n");
+  });
+
+  it("reacquires one configured owner once and shares the recovered generation", async () => {
+    const harness = await createConfiguredModelsListHarness();
+    writeFixturePlugin({ root: harness.fixture.root, spinMs: 0, pluginVersion: "v2" });
+    const phases: string[] = [];
+    const unregister = registerPreparedModelRuntimePublicationListener((event) => {
+      phases.push(event.phase);
+    });
+
+    const recovered = await Promise.all([harness.listModels(), harness.listModels()]).finally(
+      unregister,
+    );
+    const currentOwner = await prepareModelRuntimeSnapshot(harness.input);
+
+    expect(phases).toEqual(["invalidated", "published", "catalog-published"]);
+    expect(currentOwner).not.toBe(harness.initialOwner);
+    for (const result of recovered) {
+      expect(result.models).toContainEqual(
+        expect.objectContaining({ provider: PROVIDER_ID, id: "plugin-generation-v2" }),
+      );
+      expect(result.models).not.toContainEqual(
+        expect.objectContaining({ provider: PROVIDER_ID, id: "plugin-generation-v1" }),
+      );
+    }
+    expect(fs.readFileSync(harness.fixture.marker, "utf8")).toBe("start\ndone\n");
+    await expect(harness.initialOwner.loadFullModelCatalog?.()).rejects.toThrow(
+      "prepared model runtime catalog generation was superseded",
+    );
+  });
+
+  it("stops after one reacquire when the replacement worker also mismatches", async () => {
+    const harness = await createConfiguredModelsListHarness();
+    writeFixturePlugin({ root: harness.fixture.root, spinMs: 0, pluginVersion: "v2" });
+    const phases: string[] = [];
+    const unregister = registerPreparedModelRuntimePublicationListener((event) => {
+      phases.push(event.phase);
+      if (event.phase === "published") {
+        writeFixturePlugin({ root: harness.fixture.root, spinMs: 0, pluginVersion: "v3" });
+      }
+    });
+
+    await expect(harness.listModels()).rejects.toMatchObject({
+      name: "PreparedModelCatalogGenerationInvalidError",
+      message: "prepared model catalog worker reconstructed a different runtime generation",
+    });
+    unregister();
+
+    expect(phases).toEqual(["invalidated", "published"]);
+    expect(await prepareModelRuntimeSnapshot(harness.input)).not.toBe(harness.initialOwner);
+    expect(fs.existsSync(harness.fixture.marker)).toBe(false);
+  });
+
+  it("does not treat another replacement build failure as generation-invalid", async () => {
+    const harness = await createConfiguredModelsListHarness();
+    writeFixturePlugin({
+      root: harness.fixture.root,
+      spinMs: 0,
+      pluginVersion: "v2",
+      catalogError: "temporary catalog worker failure",
+    });
+    const phases: string[] = [];
+    const unregister = registerPreparedModelRuntimePublicationListener((event) => {
+      phases.push(event.phase);
+    });
+
+    let received: unknown;
+    try {
+      await harness.listModels();
+    } catch (error) {
+      received = error;
+    } finally {
+      unregister();
+    }
+
+    expect(received).toMatchObject({
+      name: "Error",
+      message: "temporary catalog worker failure",
+    });
+    expect(received).not.toBeInstanceOf(PreparedModelCatalogGenerationInvalidError);
+    expect(phases.filter((phase) => phase === "invalidated")).toHaveLength(1);
   });
 
   it("preserves ref-only api-key and token profiles through the real worker", async () => {

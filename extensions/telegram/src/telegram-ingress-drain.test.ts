@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { GrammyError } from "grammy";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { createChannelIngressQueueForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -37,7 +38,7 @@ const cfg = {
   },
 } as OpenClawConfig;
 
-function updatePayload(updateId: number): TelegramSpooledUpdatePayload {
+function updatePayload(updateId: number, chatId = 111): TelegramSpooledUpdatePayload {
   return {
     version: 1,
     updateId,
@@ -47,7 +48,7 @@ function updatePayload(updateId: number): TelegramSpooledUpdatePayload {
       message: {
         text: "hello",
         from: { id: 111 },
-        chat: { id: 111, type: "private" },
+        chat: { id: chatId, type: "private" },
       },
     },
   };
@@ -96,6 +97,12 @@ describe("resolveTelegramIngressNonRetryableFailure", () => {
 
     expect(resolveTelegramIngressNonRetryableFailure(error)).toBeNull();
   });
+
+  it("keeps unrelated prepared-runtime rebuild failures eligible for retry", () => {
+    expect(
+      resolveTelegramIngressNonRetryableFailure(new Error("temporary catalog worker failure")),
+    ).toBeNull();
+  });
 });
 
 describe("createTelegramIngressMonitor", () => {
@@ -129,6 +136,139 @@ describe("createTelegramIngressMonitor", () => {
       expect(await queue.listPending({ limit: "all" })).toEqual([]);
 
       await monitor.stop();
+    });
+  });
+
+  it("dead-letters one unrecoverable generation mismatch, drains followers, and resubmits", async () => {
+    await withTempState(async (stateDir) => {
+      const queue = createChannelIngressQueueForTests<TelegramSpooledUpdatePayload>({
+        channelId: "telegram",
+        accountId: "default",
+        stateDir,
+      });
+      const secondaryQueue = createChannelIngressQueueForTests<TelegramSpooledUpdatePayload>({
+        channelId: "telegram",
+        accountId: "secondary",
+        stateDir,
+      });
+      const poisonedId = "8".padStart(16, "0");
+      const followerBId = "9".padStart(16, "0");
+      const followerCId = "10".padStart(16, "0");
+      const independentId = "11".padStart(16, "0");
+      const poisoned = updatePayload(8);
+      const followerB = updatePayload(9);
+      const followerC = updatePayload(10);
+      const independent = updatePayload(11, 222);
+      const laneKey = telegramSpooledUpdateLaneKey(poisoned.update);
+      const metadata = { source: "issue-126108-regression" };
+      await queue.enqueue(poisonedId, poisoned, { laneKey, metadata });
+      await queue.enqueue(followerBId, followerB, { laneKey });
+      await queue.enqueue(followerCId, followerC, { laneKey });
+      await secondaryQueue.enqueue(independentId, independent, {
+        laneKey: telegramSpooledUpdateLaneKey(independent.update),
+      });
+      const dispatched: number[] = [];
+      const secondaryDispatched: number[] = [];
+      const poisonedDispatchStarted = createDeferred<void>();
+      const releasePoisonedDispatch = createDeferred<void>();
+      let poisonRecovered = false;
+      const generationInvalid = new Error(
+        "prepared model catalog worker reconstructed a different runtime generation",
+      );
+      generationInvalid.name = "PreparedModelCatalogGenerationInvalidError";
+      const monitor = createTelegramIngressMonitor({
+        queue,
+        cfg,
+        accountId: "default",
+        dispatch: async (update) => {
+          const updateId = (update as { update_id: number }).update_id;
+          dispatched.push(updateId);
+          if (updateId === poisoned.updateId && !poisonRecovered) {
+            poisonedDispatchStarted.resolve();
+            await releasePoisonedDispatch.promise;
+            return { kind: "failed-retryable", error: generationInvalid };
+          }
+        },
+      });
+      const secondaryMonitor = createTelegramIngressMonitor({
+        queue: secondaryQueue,
+        cfg,
+        accountId: "secondary",
+        dispatch: async (update) => {
+          secondaryDispatched.push((update as { update_id: number }).update_id);
+        },
+      });
+
+      monitor.start();
+      secondaryMonitor.start();
+      try {
+        await poisonedDispatchStarted.promise;
+        await vi.waitFor(() => expect(secondaryDispatched).toEqual([independent.updateId]));
+        await secondaryMonitor.waitForIdle();
+        expect(dispatched).toEqual([poisoned.updateId]);
+        expect((await queue.listClaims()).map((claim) => claim.id)).toEqual([poisonedId]);
+        await expect(
+          secondaryQueue.enqueue(independentId, independent, {
+            laneKey: telegramSpooledUpdateLaneKey(independent.update),
+          }),
+        ).resolves.toMatchObject({ kind: "completed" });
+
+        releasePoisonedDispatch.resolve();
+        await vi.waitFor(() =>
+          expect(dispatched).toEqual([poisoned.updateId, followerB.updateId, followerC.updateId]),
+        );
+        expect(await queue.listFailed?.({ limit: "all" })).toEqual([
+          expect.objectContaining({
+            id: poisonedId,
+            reason: "prepared-model-generation-invalid",
+            payload: poisoned,
+            metadata,
+            laneKey,
+            // attempts counts prior retry releases; immediate terminal dispatch has none.
+            attempts: 0,
+            message: generationInvalid.message,
+          }),
+        ]);
+        expect(await queue.listPending({ limit: "all" })).toEqual([]);
+        expect(await queue.listClaims()).toEqual([]);
+        expect(dispatched.filter((id) => id === poisoned.updateId)).toHaveLength(1);
+        for (const [id, payload] of [
+          [followerBId, followerB],
+          [followerCId, followerC],
+        ] as const) {
+          await expect(queue.enqueue(id, payload, { laneKey })).resolves.toMatchObject({
+            kind: "completed",
+          });
+        }
+        if (!queue.resubmit) {
+          throw new Error("Expected Telegram ingress dead-letter resubmit support");
+        }
+        poisonRecovered = true;
+        await expect(queue.resubmit(poisonedId)).resolves.toMatchObject({
+          kind: "resubmitted",
+          record: { id: poisonedId, payload: poisoned, metadata, laneKey, attempts: 0 },
+          previous: { reason: "prepared-model-generation-invalid", attempts: 0 },
+        });
+        monitor.requestDrain();
+        await vi.waitFor(() =>
+          expect(dispatched).toEqual([
+            poisoned.updateId,
+            followerB.updateId,
+            followerC.updateId,
+            poisoned.updateId,
+          ]),
+        );
+        await monitor.waitForIdle();
+        await expect(queue.enqueue(poisonedId, poisoned, { laneKey })).resolves.toMatchObject({
+          kind: "completed",
+        });
+        expect(await queue.listFailed?.({ limit: "all" })).toEqual([]);
+        expect(await queue.listPending({ limit: "all" })).toEqual([]);
+        expect(await queue.listClaims()).toEqual([]);
+      } finally {
+        releasePoisonedDispatch.resolve();
+        await Promise.all([monitor.stop(), secondaryMonitor.stop()]);
+      }
     });
   });
 
