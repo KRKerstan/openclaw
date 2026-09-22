@@ -185,3 +185,55 @@ export function makeFallbackSuccessAttempt(): EmbeddedRunAttemptResult {
     }),
   });
 }
+
+export function makePrimaryRateLimitAttempt(
+  profileId: string | undefined,
+  stage: "assistant" | "prompt",
+  healthyThirdProfile: boolean,
+): EmbeddedRunAttemptResult {
+  if (healthyThirdProfile && profileId === "openai:p3") {
+    return makeEmbeddedRunnerAttempt({
+      assistantTexts: ["third profile ok"],
+      lastAssistant: buildEmbeddedRunnerAssistant({
+        provider: "openai",
+        model: "mock-1",
+        stopReason: "stop",
+        content: [{ type: "text", text: "third profile ok" }],
+      }),
+    });
+  }
+  return makeEmbeddedRunnerAttempt(
+    stage === "prompt"
+      ? {
+          terminal: {
+            kind: "failed",
+            source: "prompt",
+            error: new Error(LONG_RATE_LIMIT_ERROR_MESSAGE),
+          },
+        }
+      : {
+          lastAssistant: buildEmbeddedRunnerAssistant({
+            stopReason: "error",
+            errorMessage: LONG_RATE_LIMIT_ERROR_MESSAGE,
+          }),
+        },
+  );
+}
+
+export function makeOverloadedProviderAttempt(
+  attempt: EmbeddedAttemptParams,
+): EmbeddedRunAttemptResult {
+  if (attempt.provider !== "openai" && attempt.provider !== "groq") {
+    throw new Error(`Unexpected provider ${attempt.provider}`);
+  }
+  return makeEmbeddedRunnerAttempt({
+    providerRetryMaxRetries: 3,
+    assistantTexts: [],
+    lastAssistant: buildEmbeddedRunnerAssistant({
+      provider: attempt.provider,
+      model: attempt.provider === "openai" ? "mock-1" : "mock-2",
+      stopReason: "error",
+      errorMessage: OVERLOADED_ERROR_PAYLOAD,
+    }),
+  });
+}
