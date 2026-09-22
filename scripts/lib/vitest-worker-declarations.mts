@@ -38,6 +38,8 @@ export const vitestWorkerDeclarationEntries = {
   "infra/update-managed-service-handoff-runtime-assets":
     "src/infra/update-managed-service-handoff-runtime-assets.ts",
   "infra/triage-runtime.test-support": "src/infra/triage-runtime.test-support.ts",
+  "infra/sqlite-readonly-worker.compile-cache-runtime.test-support":
+    "src/infra/sqlite-readonly-worker.compile-cache-runtime.test-support.ts",
   "cli/cli-entrypoint.test-support": "src/cli/cli-entrypoint.test-support.ts",
   ...(nativeSchtasksIntegrationEnabled
     ? {
