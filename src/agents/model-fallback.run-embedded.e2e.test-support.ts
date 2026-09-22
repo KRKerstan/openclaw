@@ -155,8 +155,7 @@ export const CLOUDFLARE_502_ERROR_PAYLOAD =
   "502 <!doctype html><html><head><title>502 Bad Gateway</title></head>" +
   "<body><h1>502 Bad Gateway</h1><p>cloudflare-nginx</p></body></html>";
 export const RATE_LIMIT_ERROR_MESSAGE = "rate limit exceeded";
-export const LONG_RATE_LIMIT_ERROR_MESSAGE =
-  "429 Too Many Requests: subscription usage limit reached";
+const LONG_RATE_LIMIT_ERROR_MESSAGE = "429 Too Many Requests: subscription usage limit reached";
 export const NO_ENDPOINTS_FOUND_ERROR_MESSAGE =
   "404 No endpoints found for deepseek/deepseek-r1:free.";
 // Captured verbatim from a real local HTTP 429 round-tripped through the real
