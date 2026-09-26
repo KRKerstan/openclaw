@@ -19,6 +19,7 @@ import {
   signDevicePayload as signDevicePayloadWithKey,
   type DeviceIdentity,
 } from "../infra/device-identity.js";
+import { stopMockedProxylineHandles } from "../infra/net/proxy/proxyline.test-support.js";
 import { captureEnv } from "../test-utils/env.js";
 import type { GatewayClientOptions } from "./client.js";
 import { createAuthFailureMessage, firstMockArg, waitForFast } from "./client.test-support.js";
@@ -265,17 +266,17 @@ function expectSecurityConnectError(
   }
 }
 
-beforeAll(async () => {
-  await loadGatewayClientModule();
-});
+beforeAll(loadGatewayClientModule);
 
 beforeEach(() => {
+  vi.spyOn(Math, "random").mockReturnValue(0);
   logDebugMock.mockClear();
   logErrorMock.mockClear();
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("GatewayClient security checks", () => {
@@ -292,14 +293,12 @@ describe("GatewayClient security checks", () => {
     "no_proxy",
   ]);
 
-  beforeEach(async () => {
+  beforeEach(() => {
     envSnapshot.restore();
     delete process.env.OPENCLAW_ALLOW_INSECURE_PRIVATE_WS;
     delete process.env.OPENCLAW_PROXY_ACTIVE;
     delete process.env.OPENCLAW_PROXY_LOOPBACK_MODE;
     delete process.env.HTTP_PROXY;
-    const { resetProxyLifecycleForTests } = await import("../infra/net/proxy/proxy-lifecycle.js");
-    resetProxyLifecycleForTests();
     installGlobalProxyMock.mockClear();
     proxylineStopMock.mockClear();
     wsInstances.length = 0;
@@ -312,8 +311,9 @@ describe("GatewayClient security checks", () => {
     delete process.env.OPENCLAW_PROXY_ACTIVE;
     delete process.env.OPENCLAW_PROXY_LOOPBACK_MODE;
     delete process.env.HTTP_PROXY;
-    const { resetProxyLifecycleForTests } = await import("../infra/net/proxy/proxy-lifecycle.js");
-    resetProxyLifecycleForTests();
+    stopMockedProxylineHandles(installGlobalProxyMock.mock.results);
+    const { getActiveManagedProxyUrl } = await import("../infra/net/proxy/active-proxy-state.js");
+    expect(getActiveManagedProxyUrl()).toBeUndefined();
     wsConstructorObservers.length = 0;
   });
 

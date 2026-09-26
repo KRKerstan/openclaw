@@ -588,7 +588,8 @@ export function countActiveRunsForSessionFromRuns(
     return 0;
   }
 
-  const readIndex = buildSubagentRunReadIndexFromRuns({ runs });
+  const now = Date.now();
+  let readIndex: SubagentRunReadIndex | undefined;
 
   const latestByChildSessionKey = new Map<string, SubagentRunRecord>();
   // Records already carry collect, and spawn admission is not request-hot, so a
@@ -612,6 +613,7 @@ export function countActiveRunsForSessionFromRuns(
       count += 1;
       continue;
     }
+    readIndex ??= buildSubagentRunReadIndexFromRuns({ runs, now });
     if (readIndex.countPendingDescendantRuns(entry.childSessionKey) > 0) {
       count += 1;
     }
@@ -624,13 +626,15 @@ function scopeRootDescendantsToRequesterAgent(
   rootSessionKey: string,
   requesterAgentId?: string,
   requesterStorePath?: string | null,
+  rootRunIds?: ReadonlySet<string>,
 ): Map<string, SubagentRunRecord> {
-  return requesterAgentId || requesterStorePath !== undefined
+  return requesterAgentId || requesterStorePath !== undefined || rootRunIds
     ? new Map(
         [...runs].filter(
           ([, entry]) =>
             entry.requesterSessionKey !== rootSessionKey ||
-            ((!requesterAgentId || entry.requesterAgentId === requesterAgentId) &&
+            ((!rootRunIds || rootRunIds.has(entry.runId)) &&
+              (!requesterAgentId || entry.requesterAgentId === requesterAgentId) &&
               (requesterStorePath === undefined ||
                 (entry.requesterStorePath ?? null) === requesterStorePath)),
         ),
@@ -644,6 +648,7 @@ export function countActiveDescendantRunsFromRuns(
   rootSessionKey: string,
   requesterAgentId?: string,
   requesterStorePath?: string | null,
+  rootRunIds?: ReadonlySet<string>,
 ): number {
   return buildSubagentRunReadIndexFromRuns({
     runs: scopeRootDescendantsToRequesterAgent(
@@ -651,6 +656,7 @@ export function countActiveDescendantRunsFromRuns(
       rootSessionKey,
       requesterAgentId,
       requesterStorePath,
+      rootRunIds,
     ),
   }).countActiveDescendantRuns(rootSessionKey);
 }
@@ -676,6 +682,7 @@ export function hasDescendantRunAwaitingSettleFromRuns(
   requesterAgentId?: string,
   requesterStorePath?: string | null,
   settledBefore?: number,
+  rootRunIds?: ReadonlySet<string>,
 ): boolean {
   return buildSubagentRunReadIndexFromRuns({
     runs: scopeRootDescendantsToRequesterAgent(
@@ -683,6 +690,7 @@ export function hasDescendantRunAwaitingSettleFromRuns(
       rootSessionKey,
       requesterAgentId,
       requesterStorePath,
+      rootRunIds,
     ),
   }).hasDescendantRunAwaitingSettle(rootSessionKey, excludeRunId, settledBefore);
 }

@@ -8,10 +8,22 @@ import { runtimeProcessEntrypoints } from "./runtime-process-entrypoints.js";
 
 type WorkerSource = {
   script: string;
+  poolId?: number;
+  started?: boolean;
+  retirementReason?: WorkerRetirementReason;
   cpuUsage: () => Promise<NodeJS.CpuUsage | undefined>;
   heap?: { value: HeapInfo; sampledAt: number };
   heapPending?: boolean;
 };
+
+export type WorkerRetirementReason =
+  | "idle_timeout"
+  | "memory_pressure"
+  | "closed"
+  | "rotation"
+  | "cancelled"
+  | "failure"
+  | "exit";
 
 const workerScriptNames = new Set([
   ...Object.values(runtimeProcessEntrypoints).map((entry) => basename(entry.distWorkerPath)),
@@ -26,6 +38,10 @@ const workerScriptNames = new Set([
   "memory-index.worker.js",
   "memory-search.worker.js",
   "session-history.worker.js",
+  "audio-worker.runtime.js",
+  "realtime-quicksilver-audio.worker.js",
+  "realtime-quicksilver-socket.worker.js",
+  "telegram-ingress-worker.runtime.js",
 ]);
 
 function workerScriptName(filename: string | URL, evalSource = false): string {
@@ -45,7 +61,13 @@ function workerScriptName(filename: string | URL, evalSource = false): string {
 const trackedWorkers = resolveGlobalSingleton(Symbol.for("openclaw.workerCpuSources"), () => {
   // Node also reports direct plugin/dependency Workers here, without a second registry.
   process.on("worker", trackWorker);
-  return { revision: 0, workers: new Map<Worker, WorkerSource>() };
+  return {
+    revision: 0,
+    nextPoolId: 0,
+    poolIds: new WeakMap<object, number>(),
+    workers: new Map<Worker, WorkerSource>(),
+    lifecycle: new Map<string, { started: number; retired: Map<WorkerRetirementReason, number> }>(),
+  };
 });
 
 export function createCpuTrackedWorker(...args: ConstructorParameters<typeof Worker>): Worker {
@@ -56,9 +78,74 @@ export function createCpuTrackedWorker(...args: ConstructorParameters<typeof Wor
   return worker;
 }
 
+/** Pool identity follows its live Workers without retaining the pool itself. */
+export function attributeWorkerToPool(worker: Worker, pool: object): void {
+  const source = trackedWorkers.workers.get(worker);
+  if (!source) {
+    return;
+  }
+  let poolId = trackedWorkers.poolIds.get(pool);
+  if (poolId === undefined) {
+    poolId = ++trackedWorkers.nextPoolId;
+    trackedWorkers.poolIds.set(pool, poolId);
+  }
+  source.poolId = poolId;
+}
+
+/** A bounded census of live pools, including Workers whose retirement is pending. */
+export function getTrackedWorkerPoolSnapshot() {
+  pruneExitedWorkers();
+  const pools = new Map<number, { poolId: number; script: string; workerCount: number }>();
+  for (const source of trackedWorkers.workers.values()) {
+    if (source.poolId === undefined) {
+      continue;
+    }
+    const pool = pools.get(source.poolId);
+    if (pool) {
+      pool.workerCount++;
+    } else {
+      pools.set(source.poolId, { poolId: source.poolId, script: source.script, workerCount: 1 });
+    }
+  }
+  return {
+    workerCount: trackedWorkers.workers.size,
+    workerPoolCount: pools.size,
+    workerPools: [...pools.values()]
+      .toSorted((a, b) => b.workerCount - a.workerCount || a.poolId - b.poolId)
+      .slice(0, 100),
+  };
+}
+
 function forgetWorker(worker: Worker): void {
-  if (trackedWorkers.workers.delete(worker)) {
-    trackedWorkers.revision++;
+  const source = trackedWorkers.workers.get(worker);
+  if (!source) {
+    return;
+  }
+  const counts = countWorkerStart(source);
+  const reason = source.retirementReason ?? "exit";
+  counts.retired.set(reason, (counts.retired.get(reason) ?? 0) + 1);
+  trackedWorkers.workers.delete(worker);
+  trackedWorkers.revision++;
+}
+
+function countWorkerStart(source: WorkerSource) {
+  let counts = trackedWorkers.lifecycle.get(source.script);
+  if (!counts) {
+    counts = { started: 0, retired: new Map<WorkerRetirementReason, number>() };
+    trackedWorkers.lifecycle.set(source.script, counts);
+  }
+  if (!source.started) {
+    source.started = true;
+    counts.started++;
+  }
+  return counts;
+}
+
+/** Record the owner's reason now; only confirmed native exit increments retirement. */
+export function markWorkerRetirement(worker: Worker, reason: WorkerRetirementReason): void {
+  const source = trackedWorkers.workers.get(worker);
+  if (source) {
+    source.retirementReason ??= reason;
   }
 }
 
@@ -67,7 +154,7 @@ function trackWorker(worker: Worker): void {
     return;
   }
   let pending = false;
-  trackedWorkers.workers.set(worker, {
+  const source: WorkerSource = {
     script: "other",
     async cpuUsage() {
       // Worker.cpuUsage cannot cancel an interrupt blocked in native work. Keep
@@ -84,7 +171,10 @@ function trackWorker(worker: Worker): void {
         pending = false;
       }
     },
-  });
+  };
+  trackedWorkers.workers.set(worker, source);
+  // Node emits "worker" inside the constructor, before the wrapper assigns its script.
+  queueMicrotask(() => countWorkerStart(source));
   trackedWorkers.revision++;
   worker.once("exit", () => forgetWorker(worker));
 }
@@ -117,12 +207,24 @@ async function refreshWorkerHeap(worker: Worker, source: WorkerSource): Promise<
   }
 }
 
+/** Read lifecycle counters without requesting native CPU or heap interrupts. */
+export function getTrackedWorkerLifecycleSnapshot() {
+  pruneExitedWorkers();
+  return {
+    workerCount: trackedWorkers.workers.size,
+    workerLifecycle: [...trackedWorkers.lifecycle].map(([script, counts]) => ({
+      script,
+      started: counts.started,
+      retired: [...counts.retired].map(([reason, count]) => ({ reason, count })),
+    })),
+  };
+}
+
 /** Read completed samples without blocking the heartbeat on a busy native isolate. */
 export function sampleTrackedWorkerMemory() {
-  pruneExitedWorkers();
   const workerHeaps: NonNullable<DiagnosticMemoryUsage["workerHeaps"]> = [];
   const memory = {
-    workerCount: trackedWorkers.workers.size,
+    ...getTrackedWorkerLifecycleSnapshot(),
     workerHeapSampledCount: 0,
     workerHeapTotalBytes: 0,
     workerHeapUsedBytes: 0,

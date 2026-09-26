@@ -85,7 +85,7 @@ import {
 import {
   getPreparedModelRuntimeAuthStore,
   setPreparedModelFullCatalogAuth,
-  setPreparedModelRuntimeAuthStore,
+  bindPreparedModelRuntimeAuth,
 } from "./prepared-model-runtime-auth.js";
 import { PreparedModelRuntimeOwnerNotPublishedError } from "./prepared-model-runtime.js";
 
@@ -414,6 +414,7 @@ describe("prepared model catalog access", () => {
         workspaceDir: "/tmp/prepared-model-catalog-workspace",
       }),
       ["anthropic"],
+      "static",
     );
   });
 
@@ -438,7 +439,7 @@ describe("prepared model catalog access", () => {
       modelCatalog: configuredCatalog,
       loadFullModelCatalog,
     };
-    setPreparedModelRuntimeAuthStore(snapshot, authStore);
+    bindPreparedModelRuntimeAuth(snapshot, { store: authStore });
     mocks.prepareSnapshot.mockResolvedValue(snapshot);
 
     await expect(loadPreparedModelCatalogSnapshot({ readOnly: true })).resolves.toBe(

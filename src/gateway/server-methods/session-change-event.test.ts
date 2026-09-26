@@ -17,6 +17,7 @@ import {
 import { createPluginRuntimeCapabilityLease } from "../../plugins/capability-lease.js";
 import { createPluginServiceGatewayEvents } from "../../plugins/gateway-events.js";
 import { sessionChanges } from "../../sessions/session-row-changes.js";
+import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import type { ChatAbortControllerEntry } from "../chat-abort.js";
 import { readGatewayAccessRevision } from "../gateway-access-revision.js";
@@ -309,7 +310,7 @@ describe("sessions.changed coalescing", () => {
         event: "sessions.changed",
         payload: { sessionKey, reason: "patch" },
       });
-      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(5_000);
       await vi.advanceTimersByTimeAsync(6_000);
       slow.resolve(initial);
       await vi.advanceTimersByTimeAsync(0);
@@ -552,7 +553,7 @@ describe("sessions.changed coalescing", () => {
         mocks.loadRow.mockReturnValue(latest);
         prepared.resolve();
         await flushPendingSessionsChangedEvents(context);
-        await vi.advanceTimersByTimeAsync(200);
+        await vi.advanceTimersByTimeAsync(5_000);
         expect(
           vi.mocked(context.broadcastToConnIds).mock.calls.map(([, payload]) => payload),
         ).toMatchObject([
@@ -594,7 +595,11 @@ describe("sessions.changed coalescing", () => {
       const projection = await createSessionRowProjection({ cfg: config });
       const context = createContext(new Set(["conn-1"]), config);
       bindSessionRowProjection(context, () => projection);
-      const connection = createGatewayConnectionState({ bootId: "event-generation", cfg: config });
+      const connection = createGatewayConnectionState({
+        scheduler: createTestGatewayScheduler("fake-timers"),
+        bootId: "event-generation",
+        cfg: config,
+      });
       const send = vi.fn<(frame: string) => void>();
       connection.clients.add({
         connId: "conn-1",

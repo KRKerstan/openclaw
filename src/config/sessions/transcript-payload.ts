@@ -19,7 +19,7 @@ import {
 import { projectSessionTranscriptReportFacts } from "./session-transcript-report-facts.js";
 
 export const MAX_COMPRESSED_EVENT_BYTES = 4 * 1024 * 1024;
-const MAX_NAVIGATION_BYTES = 16 * 1024;
+export const MAX_NAVIGATION_BYTES = 16 * 1024;
 const MIN_COMPRESS_BYTES = 1024;
 const DECODE_FUNCTION = "openclaw_transcript_payload_decode";
 const registeredDecoders = new WeakSet<DatabaseSync>();
@@ -68,7 +68,7 @@ export function createTranscriptEventInserter(database: DatabaseSync, sessionId:
     const prepared = row.preparedPayload;
     const payload =
       prepared?.eventJson === row.eventJson &&
-      prepared.storageEncoding === readStorageEncoding(database)
+      prepared.storageEncoding === readTranscriptStorageEncoding(database)
         ? prepared.payload
         : prepareTranscriptPayload(database, row.eventJson, row.parsedEvent);
     return insert({ ...row, ...payload });
@@ -94,7 +94,7 @@ export function createTranscriptPayloadUpdater(database: DatabaseSync, sessionId
   );
 }
 
-function readStorageEncoding(database: DatabaseSync): string {
+export function readTranscriptStorageEncoding(database: DatabaseSync): string {
   let encoding = storageEncodings.get(database);
   if (encoding === undefined) {
     const db = getNodeSqliteKysely<{ pragma_encoding: { encoding: string } }>(database);
@@ -118,7 +118,7 @@ export function prepareTranscriptPayloadForReuse(
 ): PreparedTranscriptPayload {
   return {
     eventJson,
-    storageEncoding: readStorageEncoding(database),
+    storageEncoding: readTranscriptStorageEncoding(database),
     payload: prepareTranscriptPayload(database, eventJson, parsedEvent),
   };
 }
@@ -182,9 +182,9 @@ function readNavigation(database: DatabaseSync, input: NavigationInput): string 
           THEN metadata.navigation_json ELSE NULL END`;
         return (
           db
-            // Materialize the parsed input once across projections; canonical bytes stay text.
+            // Full JSON and JSONB intermediates can spill to disk when materialized.
             .with(
-              (cte) => cte("source").materialized(),
+              (cte) => cte("source").notMaterialized(),
               () => source,
             )
             // The size guard and returned value must reuse one envelope, not flatten into two projections.
@@ -221,7 +221,7 @@ export function prepareTranscriptPayload(
   parsedEvent?: unknown,
 ): TranscriptPayloadRecord {
   const rawBytes = Buffer.byteLength(eventJson, "utf8");
-  const utf8 = readStorageEncoding(database) === "UTF-8";
+  const utf8 = readTranscriptStorageEncoding(database) === "UTF-8";
   const identity: TranscriptPayloadRecord = {
     event_json: eventJson,
     event_zstd: null,

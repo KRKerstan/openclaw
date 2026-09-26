@@ -30,7 +30,7 @@ import * as support from "./service.test-support.js";
 import { publishWorkerEnvironmentNativeMutation } from "./store-native-publication.js";
 
 describe("node worker provider provisioning", () => {
-  support.setupWorkerEnvironmentServiceSuite();
+  support.setupWorkerEnvironmentServiceSuite({ reuseReadWorkers: true });
   afterEach(() => closeOpenClawAgentDatabases());
 
   it.each([
@@ -819,11 +819,11 @@ describe("node worker provider provisioning", () => {
         },
       });
     });
-    seedActivePlacement(placements, {
+    await seedActivePlacement(placements, {
       environmentId: result.environmentId,
       ownerEpoch: attachedCredential.ownerEpoch,
     });
-    const turnClaim = placements.claimTurn({
+    const turnClaim = await placements.claimTurn({
       sessionId: REQUEST.sessionId,
       sessionKey: REQUEST.sessionKey,
       agentId: REQUEST.agentId,

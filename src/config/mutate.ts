@@ -50,11 +50,8 @@ import {
   type ConfigWriteOptions,
   type ConfigWriteResult,
 } from "./io.js";
-import {
-  containsConfigIncludeDirective,
-  hashConfigRaw,
-  resolveManagedRuntimeEnvBaseline,
-} from "./io.read-helpers.js";
+import { containsConfigIncludeDirective, hashConfigRaw } from "./io.read-helpers.js";
+import { resolveManagedRuntimeEnvBaseline } from "./io.runtime-env.js";
 import { configWriteCommittedSnapshot } from "./io.types.js";
 import { ConfigWritePostCommitError, type ConfigWriteRollbackStatus } from "./io.write-errors.js";
 import {
@@ -75,16 +72,13 @@ import { ConfigMutationConflictError } from "./mutation-conflict.js";
 import type { ConfigMutationBase } from "./mutation-types.js";
 import { resolveConfigPath } from "./paths.js";
 import {
-  createRuntimeConfigWriteNotification,
   finalizeRuntimeSnapshotWrite,
   hasManagedRuntimeConfigWriteOwner,
   getRuntimeConfigSnapshot,
   getRuntimeConfigSnapshotRefreshHandler,
   getRuntimeConfigSourceSnapshot,
-  notifyRuntimeConfigWriteListeners,
   preflightManagedRuntimeConfigWrite,
   preflightRuntimeSnapshotWrite,
-  projectRuntimeConfigWritePreparedCandidates,
   resolveConfigWriteAfterWrite,
   resolveConfigWriteFollowUp,
   type ConfigWriteAfterWrite,
@@ -93,9 +87,8 @@ import {
 } from "./runtime-snapshot.js";
 import { projectLegacyRuntimeConfigWrite } from "./runtime-source-projection.js";
 import {
-  attachRuntimeConfigWriteApplication,
   copyRuntimeConfigWriteApplication,
-  getRuntimeConfigWriteApplication,
+  publishRuntimeConfigWrite,
 } from "./runtime-write-application.js";
 import type { ConfigFileSnapshot, OpenClawConfig } from "./types.js";
 import { validateConfigObjectWithPlugins } from "./validation.js";
@@ -775,34 +768,17 @@ async function tryWriteIncludeOwnedConfigMutation(params: {
         }
 
         const notifyCommittedWrite = () => {
-          const currentRuntimeConfig = getRuntimeConfigSnapshot();
-          const notificationRuntimeConfig = deferRuntimeActivation
-            ? refreshedSnapshot.runtimeConfig
-            : currentRuntimeConfig;
-          if (!notificationRuntimeConfig) {
-            return;
-          }
-          const notificationPreparedCandidates = projectRuntimeConfigWritePreparedCandidates(
-            managedPreparedCandidates,
-            refreshedSnapshot.runtimeConfig,
-            refreshedSnapshot.sourceConfig,
-          );
-          notifyRuntimeConfigWriteListeners(
-            attachRuntimeConfigWriteApplication(
-              createRuntimeConfigWriteNotification({
-                configPath: params.snapshot.path,
-                sourceConfig: refreshedSnapshot.sourceConfig,
-                runtimeConfig: notificationRuntimeConfig,
-                persistedHash,
-                afterWrite: params.afterWrite ?? params.writeOptions?.afterWrite,
-                runtimeRefresh: params.writeOptions?.runtimeRefresh,
-                ...(notificationPreparedCandidates.size > 0
-                  ? { preparedCandidatesByOwner: notificationPreparedCandidates }
-                  : {}),
-              }),
-              getRuntimeConfigWriteApplication(params.writeOptions ?? {}),
-            ),
-          );
+          publishRuntimeConfigWrite({
+            configPath: params.snapshot.path,
+            snapshot: refreshedSnapshot,
+            sourceConfig: refreshedSnapshot.sourceConfig,
+            runtimeConfig: refreshedSnapshot.runtimeConfig,
+            persistedHash,
+            deferRuntimeActivation,
+            preparedCandidates: managedPreparedCandidates,
+            writeOptions: params.writeOptions,
+            afterWrite: params.afterWrite,
+          });
         };
         // A managed listener may accept this write and advance its own environment
         // generation. Check the prepared generation before that owned transition.
@@ -813,9 +789,8 @@ async function tryWriteIncludeOwnedConfigMutation(params: {
           assertCurrent: assertPostCommitCurrent,
           nextSourceConfig: refreshedSnapshot.sourceConfig,
           refreshOptions: params.writeOptions?.runtimeRefresh,
-          hadRuntimeSnapshot,
           hadBothSnapshots,
-          loadFreshConfig: () => refreshedSnapshot.runtimeConfig,
+          freshConfig: refreshedSnapshot.runtimeConfig,
           notifyCommittedWrite,
           preflightResult: runtimePreflightResult,
           deferRuntimeActivation,
@@ -1167,10 +1142,10 @@ type MutateConfigFileParams<T> = Omit<TransformConfigFileParams<T>, "transform" 
   mutate: (draft: OpenClawConfig, context: ConfigMutationContext) => Promise<T | void> | T | void;
 };
 
-export async function mutateConfigFile<T = void>(
+function configMutationTransform<T>(
   params: MutateConfigFileParams<T>,
-): Promise<ConfigMutationResult<T>> {
-  return await transformConfigFile<T>({
+): TransformConfigFileParams<T> {
+  return {
     base: params.base,
     baseHash: params.baseHash,
     afterWrite: params.afterWrite,
@@ -1181,24 +1156,21 @@ export async function mutateConfigFile<T = void>(
       const result = (await params.mutate(draft, context)) as T | undefined;
       return { nextConfig: draft, result };
     },
-  });
+  };
+}
+
+export async function mutateConfigFile<T = void>(
+  params: MutateConfigFileParams<T>,
+): Promise<ConfigMutationResult<T>> {
+  return await transformConfigFile(configMutationTransform(params));
 }
 
 export async function mutateConfigFileWithRetry<T = void>(
   params: MutateConfigFileParams<T> & { maxAttempts?: number },
 ): Promise<ConfigMutationResult<T>> {
   return await transformConfigFileWithRetry<T>({
-    base: params.base,
-    baseHash: params.baseHash,
+    ...configMutationTransform(params),
     maxAttempts: params.maxAttempts,
-    afterWrite: params.afterWrite,
-    writeOptions: params.writeOptions,
-    io: params.io,
-    transform: async (currentConfig, context) => {
-      const draft = structuredClone(currentConfig);
-      const result = (await params.mutate(draft, context)) as T | undefined;
-      return { nextConfig: draft, result };
-    },
   });
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

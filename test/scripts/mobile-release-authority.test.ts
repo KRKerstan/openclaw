@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import {
   cleanupOwnedKeychain,
@@ -18,6 +18,7 @@ import { applyMobileReleasePlan, planMobileRelease } from "../../scripts/mobile-
 import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { cleanupTempDirs, makeTempDir, useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import { runVitestShutdownCommand } from "../helpers/vitest-shutdown-command.js";
+import { registerBoundedSignalTests } from "./mobile-release-process.test-support.js";
 
 const REPOSITORY = "openclaw/openclaw";
 const TARGET_REF = "release/2026.9.2-mobile";
@@ -45,6 +46,8 @@ const TOOLING_FILES = [
   "scripts/lib/release-version.mjs",
 ] as const;
 const tempRoots = useAutoCleanupTempDirTracker(afterEach);
+const repositoryTemplateRoots = useAutoCleanupTempDirTracker(afterAll);
+const repositoryTemplates = new Map<string, ReturnType<typeof createFixtureRepositories>>();
 const joinedObservationRoots: string[] = [];
 afterEach(() => cleanupTempDirs(joinedObservationRoots));
 
@@ -464,22 +467,12 @@ if (endpoint.includes("/collaborators/")) {
   );
 }
 
-function createFixture(options: FixtureOptions = {}): Fixture {
+function createFixtureRepositories(root: string, options: FixtureOptions) {
   const platform = options.platform ?? "ios";
-  const root = tempRoots.make("openclaw-mobile-release-authority-");
   const source = path.join(root, "source");
   const trusted = path.join(root, "trusted");
   const workspace = path.join(root, "workspace");
-  const runnerTemp = path.join(root, "runner");
-  const stateDir = path.join(root, "state");
-  const binDir = path.join(root, "bin");
-  const outputPath = path.join(root, "output");
   fs.mkdirSync(source);
-  fs.mkdirSync(runnerTemp);
-  fs.mkdirSync(stateDir);
-  fs.mkdirSync(binDir);
-  fs.writeFileSync(outputPath, "");
-
   git(source, "init", "-b", "main");
   git(source, "config", "user.email", "ci@example.invalid");
   git(source, "config", "user.name", "Mobile Release Test");
@@ -545,6 +538,64 @@ function createFixture(options: FixtureOptions = {}): Fixture {
     workspace,
   );
   git(workspace, "checkout", "--detach", targetSha);
+
+  return { source, trusted, workspace, baseSha, targetSha };
+}
+
+function prepareFixtureRepositories(root: string, options: FixtureOptions) {
+  if (
+    options.mutateBase ||
+    options.beforeCandidate ||
+    options.buildCandidate ||
+    options.mutateCandidate
+  ) {
+    return createFixtureRepositories(root, options);
+  }
+  const key = JSON.stringify([
+    options.platform ?? "ios",
+    options.baseState ?? null,
+    options.emptyCandidate ?? false,
+    options.realFetch ?? false,
+  ]);
+  let template = repositoryTemplates.get(key);
+  if (!template) {
+    template = createFixtureRepositories(
+      repositoryTemplateRoots.make("openclaw-mobile-release-repositories-"),
+      options,
+    );
+    git(template.source, "repack", "-ad");
+    repositoryTemplates.set(key, template);
+  }
+  const source = path.join(root, "source");
+  const trusted = path.join(root, "trusted");
+  const workspace = path.join(root, "workspace");
+  // Ref, index, and object mutations stay private, including cold partial-clone faults.
+  const copyOptions = { recursive: true, mode: fs.constants.COPYFILE_FICLONE };
+  fs.cpSync(template.source, source, copyOptions);
+  fs.cpSync(template.trusted, trusted, copyOptions);
+  fs.cpSync(template.workspace, workspace, copyOptions);
+  for (const repository of [trusted, workspace]) {
+    git(repository, "remote", "set-url", "origin", source);
+  }
+  return { ...template, source, trusted, workspace };
+}
+
+function createFixture(options: FixtureOptions = {}): Fixture {
+  const platform = options.platform ?? "ios";
+  const root = tempRoots.make("openclaw-mobile-release-authority-");
+  const runnerTemp = path.join(root, "runner");
+  const stateDir = path.join(root, "state");
+  const binDir = path.join(root, "bin");
+  const outputPath = path.join(root, "output");
+  fs.mkdirSync(runnerTemp);
+  fs.mkdirSync(stateDir);
+  fs.mkdirSync(binDir);
+  fs.writeFileSync(outputPath, "");
+
+  const { source, trusted, workspace, baseSha, targetSha } = prepareFixtureRepositories(
+    root,
+    options,
+  );
 
   writeGitShim(binDir, options.realFetch === true);
   writeGhShim(binDir);
@@ -3369,7 +3420,7 @@ fi
           {
             environment?: string;
             if?: unknown;
-            needs?: string;
+            needs?: string | string[];
             "runs-on"?: string;
             steps: Array<{
               "continue-on-error"?: unknown;
@@ -3389,14 +3440,14 @@ fi
       expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
       expect(Object.keys(workflow.jobs)).toEqual(
         platform === "ios"
-          ? ["authorize", "release", "recover-record", "inspect"]
+          ? ["authorize", "qualify", "release", "recover-record", "inspect"]
           : ["authorize", "release", "recover-record"],
       );
       expect(workflow.jobs.authorize?.environment).toBeUndefined();
       expect(workflow.jobs.release?.environment).toBe(environment);
       expect(workflow.jobs["recover-record"]?.environment).toBe(environment);
       const authorityCheckouts = Object.values(workflow.jobs).flatMap((job) =>
-        job.steps.filter(
+        (job.steps ?? []).filter(
           (step) =>
             typeof step.with?.["sparse-checkout"] === "string" &&
             step.with["sparse-checkout"].includes(".github/actions/mobile-release-authority"),
@@ -3418,7 +3469,7 @@ fi
       if (!release) {
         throw new Error(`${file}: missing release job`);
       }
-      expect(release.needs).toBe("authorize");
+      expect(release.needs).toEqual(platform === "ios" ? ["authorize", "qualify"] : "authorize");
       expect(release["runs-on"]).toBe(releaseRunner);
       expect(release.if).toBe(
         "inputs.operation == 'upload-and-record' && needs.authorize.outputs.approved == 'true'",
@@ -3608,16 +3659,16 @@ fi
           "bundler-cache": false,
           "ruby-version": "3.4.10",
           "working-directory": "apps/android",
-          bundler: "2.6.9",
+          bundler: "4.0.21",
         });
-        expect(bundleStep?.run).toContain("bundle _2.6.9_ install --jobs 4 --retry 3");
-        expect(bundleStep?.run).toContain("bundle _2.6.9_ check");
-        expect(bundleStep?.run).toContain("bundle _2.6.9_ exec ruby");
+        expect(bundleStep?.run).toContain("bundle _4.0.21_ install --jobs 4 --retry 3");
+        expect(bundleStep?.run).toContain("bundle _4.0.21_ check");
+        expect(bundleStep?.run).toContain("bundle _4.0.21_ exec ruby");
         expect(source).not.toContain("gem install fastlane");
       }
 
       const secretPlacements = Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
-        job.steps.flatMap((step) => {
+        (job.steps ?? []).flatMap((step) => {
           const serialized = JSON.stringify(step);
           return ["GH_APP_PRIVATE_KEY", "MATCH_PASSWORD"]
             .filter((secret) => serialized.includes(`secrets.${secret}`))
@@ -3802,7 +3853,7 @@ fi
         string,
         {
           environment?: string;
-          steps: Array<{
+          steps?: Array<{
             env?: Record<string, string>;
             name: string;
             run?: string;
@@ -3811,7 +3862,7 @@ fi
       >;
     };
     const placements = Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
-      job.steps.flatMap((step) =>
+      (job.steps ?? []).flatMap((step) =>
         Object.entries(step.env ?? {})
           .filter(([, value]) => value.includes("TESTFLIGHT_INTERNAL_GROUP"))
           .map(([envName, value]) => ({
@@ -3841,7 +3892,7 @@ fi
       },
     ]);
 
-    const uploadStep = workflow.jobs.release?.steps.find((step) =>
+    const uploadStep = workflow.jobs.release?.steps?.find((step) =>
       step.run?.includes("pnpm ios:release:upload"),
     );
     expect(uploadStep?.env).toMatchObject({
@@ -3849,7 +3900,7 @@ fi
       SCAN_DEPLOYMENT_TARGET_VERSION: project.options?.deploymentTarget?.iOS,
     });
     const scanPlacements = Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
-      job.steps.flatMap((step) =>
+      (job.steps ?? []).flatMap((step) =>
         Object.entries(step.env ?? {})
           .filter(([envName]) => envName.startsWith("SCAN_"))
           .map(([envName, value]) => ({ envName, jobName, stepName: step.name, value })),
@@ -4016,8 +4067,8 @@ fi
     const prepared = runSigningProof();
     expect(prepared.result.status, prepared.result.stderr).toBe(0);
     expect(prepared.events).toEqual([
-      "bundle:_2.6.9_ check",
-      "bundle:_2.6.9_ exec fastlane ios signing_check",
+      "bundle:_4.0.21_ check",
+      "bundle:_4.0.21_ exec fastlane ios signing_check",
       "probe:root-cwd",
     ]);
     expect(signingProof).toContain("source ./scripts/lib/ios-fastlane.sh");
@@ -4025,7 +4076,7 @@ fi
 
     const failedCheck = runSigningProof({ FIXTURE_FAIL_CHECK: "1" });
     expect(failedCheck.result.status).not.toBe(0);
-    expect(failedCheck.events).toEqual(["bundle:_2.6.9_ check"]);
+    expect(failedCheck.events).toEqual(["bundle:_4.0.21_ check"]);
 
     const authorityCheckout = releaseSteps.find(
       (step) => step.name === "Checkout trusted mobile release authority",
@@ -4421,6 +4472,8 @@ fi
     expect(unsafeCommandCount).toBe(0);
   });
 
+  registerBoundedSignalTests();
+
   it("bounds owned child process trees", async () => {
     const runnerTemp = tempRoots.make("openclaw-ios-keychain-process-runner-");
     if (process.platform !== "win32") {
@@ -4465,7 +4518,10 @@ try {
 }
 const processIds = fs.readFileSync(${JSON.stringify(pidFile)}, "utf8").trim().split("\\n").map(Number);
 let processGroupAlive = true;
-try { process.kill(-processIds[0], 0); } catch { processGroupAlive = false; }
+try { process.kill(-processIds[0], 0); } catch (error) {
+  if (error?.code !== "ESRCH") throw error;
+  processGroupAlive = false;
+}
 process.stdout.write(JSON.stringify({ elapsedMs: Date.now() - startedAt, message, processGroupAlive, processIds }));
 `;
         const result = spawnSync(

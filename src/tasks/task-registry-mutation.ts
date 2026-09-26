@@ -4,7 +4,7 @@ import {
   updateFlowRecordByIdExpectedRevision,
 } from "./task-flow-runtime-internal.js";
 import { buildManagedFlowCancellationPatch } from "./task-initial-flow.rules.js";
-import { clearTaskActivity, flushTaskActivity } from "./task-registry-activity.js";
+import { flushTaskActivity } from "./task-registry-activity.js";
 import { ensureLinkedTaskFlowRegistryReady } from "./task-registry-flow-link.js";
 import { listTasksForFlowId } from "./task-registry-query.js";
 import {
@@ -13,6 +13,7 @@ import {
   cloneTaskRecordForObserver,
 } from "./task-registry-records.js";
 import {
+  clearTaskActivity,
   withTaskRegistryMutation,
   syncFlowFromTaskAfterTaskMutation,
   bumpTaskRegistryRevision,
@@ -80,6 +81,7 @@ type TaskRecordPublication = {
 export function updateTaskWithPublication(
   taskId: string,
   patch: Partial<TaskRecord>,
+  deferObserver?: (publish: () => void) => void,
 ): TaskRecordPublication | null {
   return withTaskRegistryMutation(
     () => {
@@ -100,7 +102,7 @@ export function updateTaskWithPublication(
           return null;
         }
       }
-      return publishTaskRecordUpdate(current, next, persisted);
+      return publishTaskRecordUpdate(current, next, persisted, deferObserver);
     },
     () => null,
   );
@@ -111,6 +113,7 @@ export function publishTaskRecordUpdate(
   current: TaskRecord,
   next: TaskRecord,
   persisted: boolean,
+  deferObserver?: (publish: () => void) => void,
 ): TaskRecordPublication {
   const taskId = next.taskId;
   // Flow synchronization and observers can replace this row before the call returns.
@@ -155,11 +158,17 @@ export function publishTaskRecordUpdate(
       error,
     });
   }
-  emitTaskRegistryObserverEvent(() => ({
-    kind: "upserted",
-    task: cloneTaskRecordForObserver(next),
-    previous: cloneTaskRecordForObserver(current),
-  }));
+  const publish = () =>
+    emitTaskRegistryObserverEvent(() => ({
+      kind: "upserted",
+      task: cloneTaskRecordForObserver(next),
+      previous: cloneTaskRecordForObserver(current),
+    }));
+  if (deferObserver) {
+    deferObserver(publish);
+  } else {
+    publish();
+  }
   return { task: cloneTaskRecord(next), isCurrent: () => tasks.get(taskId) === published };
 }
 

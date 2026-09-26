@@ -28,6 +28,7 @@ import * as support from "./service.test-support.js";
 import { createWorkerEnvironmentStore } from "./store.js";
 import { measureLaunchTurn } from "./worker-turn-launcher.test-support.js";
 import { createWorkerWorkspaceOperationCoordinator } from "./workspace-operation-coordinator.js";
+import { createWorkerWorkspaceRecoveryFixture } from "./workspace-recovery.test-support.js";
 
 type WorkerEnvironmentServiceError = support.WorkerEnvironmentServiceError;
 
@@ -227,7 +228,7 @@ describe("worker environment service provision replay", () => {
       database: support.testState.stateDb,
       now: () => support.testState.nowMs,
     });
-    const placement = placements.startDispatch(REQUEST);
+    const placement = await placements.startDispatch(REQUEST);
     const idempotencyKey = `session-dispatch:${REQUEST.sessionId}:${placement.generation}`;
     const intent = deriveEnvironmentIntent(idempotencyKey);
     placements.transition({
@@ -371,9 +372,9 @@ describe("worker environment service provision replay", () => {
       runReclaimBarrier: async ({ begin, reclaim }) =>
         await reclaim({ kind: "local", path: "/gateway/workspace" }, begin()),
       runFailedReclaimBarrier: async ({ reclaim }) => await reclaim(),
-      resolveWorkspace: async () => ({ kind: "local", path: "/gateway/workspace" }),
-      reportWorkspaceResultConflict: async () => {},
-      resolveWorkspaceResultConflict: async () => ({ kind: "absent" }),
+      ...createWorkerWorkspaceRecoveryFixture({
+        resolveWorkspace: async () => ({ kind: "local", path: "/gateway/workspace" }),
+      }),
       onActivated,
     });
     const uninstallReconcileGuard = restarted.installReconcileEnvironmentGuard(

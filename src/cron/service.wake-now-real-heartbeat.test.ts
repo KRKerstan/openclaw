@@ -40,7 +40,7 @@ import {
 } from "./active-jobs.js";
 import { CronService, type CronEvent } from "./service.js";
 import type { CronServiceDeps } from "./service/state.js";
-import { loadCronJobsStoreSync } from "./store.js";
+import { loadCronJobsStore } from "./store.js";
 
 installHeartbeatRunnerTestRuntime();
 beforeAll(async () => {
@@ -261,7 +261,7 @@ async function runMainCronCase(
         : mode === "scheduled"
           ? terminal.runAtMs! + terminal.durationMs! + 30_000
           : scheduledNextRunAtMs;
-      const persisted = loadCronJobsStoreSync(sandbox.cronStorePath).jobs.find(
+      const persisted = (await loadCronJobsStore(sandbox.cronStorePath)).jobs.find(
         (entry) => entry.id === job.id,
       );
       for (const completed of [cron.getJob(job.id), persisted, terminal.job]) {
@@ -398,19 +398,29 @@ describe("main cron with the real heartbeat runner", () => {
         },
       });
       const events: CronEvent[] = [];
+      const requested = createDeferred();
+      const finished = createDeferred<CronEvent>();
       const deps: CronServiceDeps = {
         storePath: sandbox.cronStorePath,
         cronEnabled: true,
         log: noopLogger,
         enqueueSystemEvent: vi.fn(),
         requestHeartbeat: queueHeartbeat,
-        requestHeartbeatAndWait: (wake, lifecycle) =>
-          requestHeartbeatAndWait({ ...wake, coalesceMs: 0 }, lifecycle),
+        requestHeartbeatAndWait: (wake, lifecycle) => {
+          const pending = requestHeartbeatAndWait({ ...wake, coalesceMs: 0 }, lifecycle);
+          requested.resolve();
+          return pending;
+        },
         resolveHeartbeatTimeoutMs: () => 100,
         runIsolatedAgentJob: vi.fn<CronServiceDeps["runIsolatedAgentJob"]>(async () => ({
           status: "ok",
         })),
-        onEvent: (event) => events.push(structuredClone(event)),
+        onEvent: (event) => {
+          events.push(structuredClone(event));
+          if (event.action === "finished") {
+            finished.resolve(event);
+          }
+        },
       };
       const foreground = createDeferred();
       const foregroundRun = busy
@@ -433,12 +443,14 @@ describe("main cron with the real heartbeat runner", () => {
           },
           { enabledExplicit: true, systemOwned: true },
         );
-        await vi.waitFor(() => {
-          expect(events.findLast((event) => event.action === "finished")).toMatchObject({
-            jobId: job.id,
-            status: "skipped",
-            error: `heartbeat skipped: ${reason}`,
-          });
+        // Finish this tick before admission registers its zero-delay wake timer.
+        vi.advanceTimersByTime(job.state.nextRunAtMs! - Date.now());
+        await requested.promise;
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(finished.promise).resolves.toMatchObject({
+          jobId: job.id,
+          status: "skipped",
+          error: `heartbeat skipped: ${reason}`,
         });
         expect(attempts).toEqual([{ status: "skipped", reason }]);
         const completed = cron.getJob(job.id)!;

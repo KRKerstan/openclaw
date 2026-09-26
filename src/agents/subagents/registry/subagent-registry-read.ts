@@ -3,9 +3,17 @@
  *
  * Combines persisted snapshots with in-memory live runs for UI, announce, control, and recovery paths.
  */
+import { isVitestRuntimeEnv } from "../../../infra/env.js";
+import { getAsyncWorkSignal } from "../../../shared/async-work-scope.js";
+import {
+  executeExistingOpenClawStateRead,
+  getActiveOpenClawStateDatabaseReadSnapshot,
+} from "../../../state/openclaw-state-db-readonly.js";
+import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.types.js";
 import { normalizeDeliveryContext } from "../../../utils/delivery-context.shared.js";
 import type { DeliveryContext } from "../../../utils/delivery-context.types.js";
 import { getSubagentRunsForChildSession, subagentRuns } from "./subagent-registry-memory.js";
+import { getSubagentRegistryPublicationRevision } from "./subagent-registry-publication.js";
 import {
   buildLatestSubagentRunReadIndexFromRuns,
   buildSubagentRunReadIndexFromRuns,
@@ -28,6 +36,7 @@ import {
   getSubagentSessionListRunsSnapshotForChildSessions,
   getSubagentSessionListRunsSnapshotForSessions,
   getSubagentRunsSnapshotForChildSession,
+  getPreparedSubagentRunsSnapshotForChildSession,
   getSubagentRunsSnapshotForController,
   getSubagentRunsSnapshotForRead,
   getSubagentRunsSnapshotForSessions,
@@ -50,10 +59,13 @@ export {
 export function buildSubagentSessionListReadIndex(
   now = Date.now(),
   sessionKeys?: readonly string[],
+  preparedRuns?: Map<string, SubagentRunReadRecord>,
 ): SubagentRunReadIndex<SubagentRunReadRecord> {
-  const runs = sessionKeys
-    ? getSubagentSessionListRunsSnapshotForSessions(subagentRuns, sessionKeys)
-    : getSubagentSessionListRunsSnapshotForRead(subagentRuns);
+  const runs =
+    preparedRuns ??
+    (sessionKeys
+      ? getSubagentSessionListRunsSnapshotForSessions(subagentRuns, sessionKeys)
+      : getSubagentSessionListRunsSnapshotForRead(subagentRuns));
   return buildSubagentRunReadIndexFromRuns({
     runs,
     inMemoryRuns: sessionKeys
@@ -99,12 +111,14 @@ export function countActiveDescendantRuns(
   rootSessionKey: string,
   requesterAgentId?: string,
   requesterStorePath?: string | null,
+  rootRunIds?: ReadonlySet<string>,
 ): number {
   return countActiveDescendantRunsFromRuns(
     getSubagentRunsSnapshotForSessions(subagentRuns, [rootSessionKey]),
     rootSessionKey,
     requesterAgentId,
     requesterStorePath,
+    rootRunIds,
   );
 }
 
@@ -131,6 +145,7 @@ export function hasDescendantRunAwaitingSettle(
   requesterAgentId?: string,
   requesterStorePath?: string | null,
   settledBefore?: number,
+  rootRunIds?: ReadonlySet<string>,
 ): boolean {
   return hasDescendantRunAwaitingSettleFromRuns(
     getSubagentRunsSnapshotForSessions(subagentRuns, [rootSessionKey]),
@@ -139,6 +154,7 @@ export function hasDescendantRunAwaitingSettle(
     requesterAgentId,
     requesterStorePath,
     settledBefore,
+    rootRunIds,
   );
 }
 
@@ -262,4 +278,63 @@ export function getLatestLiveSubagentRunByChildSessionKey(
       matches,
     ) ?? null
   );
+}
+
+/** Consume fresh retained state and the current live overlay in the caller's synchronous phase. */
+export async function withPreparedLatestSubagentRunByChildSessionKey<T>(
+  childSessionKey: string,
+  context: OpenClawStateWorkerContext,
+  consume: (read: () => SubagentRunRecord | null) => T,
+): Promise<T> {
+  const key = childSessionKey.trim();
+  const requestSignal = getAsyncWorkSignal();
+  const readOptions = { path: context.admission.databasePath, env: context.environment };
+  const snapshot = getActiveOpenClawStateDatabaseReadSnapshot(readOptions);
+  const assertCurrent = () => {
+    requestSignal?.throwIfAborted();
+    getAsyncWorkSignal()?.throwIfAborted();
+    if (getActiveOpenClawStateDatabaseReadSnapshot(readOptions) !== snapshot) {
+      throw new Error("Prepared subagent child-session read left its database snapshot scope");
+    }
+    context.maintenanceScope?.assertAdmission();
+    context.admission.assertCurrent();
+  };
+  for (;;) {
+    assertCurrent();
+    const revision = getSubagentRegistryPublicationRevision();
+    const reply =
+      key &&
+      (!isVitestRuntimeEnv() || process.env.OPENCLAW_TEST_READ_SUBAGENT_RUNS_FROM_SQLITE === "1")
+        ? await executeExistingOpenClawStateRead(
+            readOptions,
+            { type: "subagents.forChildSession", childSessionKey: key },
+            { context },
+          )
+        : undefined;
+    assertCurrent();
+    if (revision !== getSubagentRegistryPublicationRevision()) {
+      continue;
+    }
+    if (reply && (!reply.ok || reply.type !== "subagents.forChildSession")) {
+      throw new Error("Unexpected subagent child-session read response");
+    }
+    const persisted = reply?.runs ?? [];
+    let active = true;
+    try {
+      return consume(() => {
+        assertCurrent();
+        if (!active || revision !== getSubagentRegistryPublicationRevision()) {
+          throw new Error("Prepared subagent child-session read is no longer current");
+        }
+        return key
+          ? (getLatestSubagentRunByChildSessionKeyFromRuns(
+              getPreparedSubagentRunsSnapshotForChildSession(subagentRuns, key, persisted, context),
+              key,
+            ) ?? null)
+          : null;
+      });
+    } finally {
+      active = false;
+    }
+  }
 }
