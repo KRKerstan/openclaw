@@ -12184,7 +12184,50 @@ public struct PortalSummary: Codable, Sendable {
     }
 }
 
+public struct PresenceDevice: Codable, Sendable {
+    public let id: String
+    public let nodeid: String?
+    public let name: String
+    public let kind: AnyCodable
+    public let personids: [String]
+    public let online: Bool
+    public let activity: AnyCodable
+    public let connections: [[String: AnyCodable]]
+
+    public init(
+        id: String,
+        nodeid: String? = nil,
+        name: String,
+        kind: AnyCodable,
+        personids: [String],
+        online: Bool,
+        activity: AnyCodable,
+        connections: [[String: AnyCodable]])
+    {
+        self.id = id
+        self.nodeid = nodeid
+        self.name = name
+        self.kind = kind
+        self.personids = personids
+        self.online = online
+        self.activity = activity
+        self.connections = connections
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case nodeid = "nodeId"
+        case name
+        case kind
+        case personids = "personIds"
+        case online
+        case activity
+        case connections
+    }
+}
+
 public struct PresenceEntry: Codable, Sendable {
+    public let connectionid: String?
     public let host: String?
     public let clientid: String?
     public let ip: String?
@@ -12201,6 +12244,7 @@ public struct PresenceEntry: Codable, Sendable {
     public let ts: Int
     public let onlinesince: Int?
     public let lastactivityat: Int?
+    public let connectionlastactivityat: Int?
     public let deviceid: String?
     public let roles: [String]?
     public let scopes: [String]?
@@ -12209,6 +12253,7 @@ public struct PresenceEntry: Codable, Sendable {
     public let watchedsessions: [String]?
 
     public init(
+        connectionid: String? = nil,
         host: String? = nil,
         clientid: String? = nil,
         ip: String? = nil,
@@ -12225,6 +12270,7 @@ public struct PresenceEntry: Codable, Sendable {
         ts: Int,
         onlinesince: Int? = nil,
         lastactivityat: Int? = nil,
+        connectionlastactivityat: Int? = nil,
         deviceid: String? = nil,
         roles: [String]? = nil,
         scopes: [String]? = nil,
@@ -12232,6 +12278,7 @@ public struct PresenceEntry: Codable, Sendable {
         user: [String: AnyCodable]? = nil,
         watchedsessions: [String]? = nil)
     {
+        self.connectionid = connectionid
         self.host = host
         self.clientid = clientid
         self.ip = ip
@@ -12248,6 +12295,7 @@ public struct PresenceEntry: Codable, Sendable {
         self.ts = ts
         self.onlinesince = onlinesince
         self.lastactivityat = lastactivityat
+        self.connectionlastactivityat = connectionlastactivityat
         self.deviceid = deviceid
         self.roles = roles
         self.scopes = scopes
@@ -12257,6 +12305,7 @@ public struct PresenceEntry: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case connectionid = "connectionId"
         case host
         case clientid = "clientId"
         case ip
@@ -12273,12 +12322,161 @@ public struct PresenceEntry: Codable, Sendable {
         case ts
         case onlinesince = "onlineSince"
         case lastactivityat = "lastActivityAt"
+        case connectionlastactivityat = "connectionLastActivityAt"
         case deviceid = "deviceId"
         case roles
         case scopes
         case instanceid = "instanceId"
         case user
         case watchedsessions = "watchedSessions"
+    }
+}
+
+public struct PresenceLocation: Codable, Sendable {
+    public let source: String
+    public let status: AnyCodable
+    public let city: String?
+    public let region: String?
+    public let country: String?
+    public let countrycode: String?
+    public let attribution: [String: AnyCodable]?
+
+    public init(
+        source: String,
+        status: AnyCodable,
+        city: String? = nil,
+        region: String? = nil,
+        country: String? = nil,
+        countrycode: String? = nil,
+        attribution: [String: AnyCodable]? = nil)
+    {
+        self.source = source
+        self.status = status
+        self.city = city
+        self.region = region
+        self.country = country
+        self.countrycode = countrycode
+        self.attribution = attribution
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case source
+        case status
+        case city
+        case region
+        case country
+        case countrycode = "countryCode"
+        case attribution
+    }
+}
+
+public struct PresencePerson: Codable, Sendable {
+    public let id: String
+    public let profileid: String?
+    public let name: String
+    public let online: Bool
+    public let onlinesince: Int?
+    public let activity: AnyCodable
+    public let devicecount: Int
+    public let devices: [PresenceDevice]?
+
+    public init(
+        id: String,
+        profileid: String? = nil,
+        name: String,
+        online: Bool,
+        onlinesince: Int? = nil,
+        activity: AnyCodable,
+        devicecount: Int,
+        devices: [PresenceDevice]? = nil)
+    {
+        self.id = id
+        self.profileid = profileid
+        self.name = name
+        self.online = online
+        self.onlinesince = onlinesince
+        self.activity = activity
+        self.devicecount = devicecount
+        self.devices = devices
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case profileid = "profileId"
+        case name
+        case online
+        case onlinesince = "onlineSince"
+        case activity
+        case devicecount = "deviceCount"
+        case devices
+    }
+}
+
+public struct PresenceQueryParams: Codable, Sendable {
+    public let action: AnyCodable?
+    public let person: String?
+    public let deviceid: String?
+    public let include: [AnyCodable]?
+    public let limit: Int?
+
+    public init(
+        action: AnyCodable? = nil,
+        person: String? = nil,
+        deviceid: String? = nil,
+        include: [AnyCodable]? = nil,
+        limit: Int? = nil)
+    {
+        self.action = action
+        self.person = person
+        self.deviceid = deviceid
+        self.include = include
+        self.limit = limit
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case person
+        case deviceid = "deviceId"
+        case include
+        case limit
+    }
+}
+
+public struct PresenceQueryResult: Codable, Sendable {
+    public let observedat: Int
+    public let status: AnyCodable
+    public let people: [PresencePerson]
+    public let devices: [PresenceDevice]?
+    public let totalpeople: Int
+    public let truncated: Bool
+    public let message: String?
+
+    public init(
+        observedat: Int,
+        status: AnyCodable,
+        people: [PresencePerson],
+        devices: [PresenceDevice]? = nil,
+        totalpeople: Int,
+        truncated: Bool,
+        message: String? = nil)
+    {
+        self.observedat = observedat
+        self.status = status
+        self.people = people
+        self.devices = devices
+        self.totalpeople = totalpeople
+        self.truncated = truncated
+        self.message = message
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case observedat = "observedAt"
+        case status
+        case people
+        case devices
+        case totalpeople = "totalPeople"
+        case truncated
+        case message
     }
 }
 
@@ -13739,6 +13937,36 @@ public struct SessionActivitySummary: Codable, Sendable {
     }
 }
 
+public struct SessionAncestorRef: Codable, Sendable {
+    public let key: String
+    public let sessionid: String?
+    public let agentid: String?
+    public let revision: String
+    public let snapshotat: Double
+
+    public init(
+        key: String,
+        sessionid: String? = nil,
+        agentid: String? = nil,
+        revision: String,
+        snapshotat: Double)
+    {
+        self.key = key
+        self.sessionid = sessionid
+        self.agentid = agentid
+        self.revision = revision
+        self.snapshotat = snapshotat
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case sessionid = "sessionId"
+        case agentid = "agentId"
+        case revision
+        case snapshotat = "snapshotAt"
+    }
+}
+
 public struct SessionApprovalReplay: Codable, Sendable {
     public let sessionkey: String
     public let updatedatms: Int
@@ -14267,6 +14495,24 @@ public struct SessionDiscussionOpenResult: Codable, Sendable {
         case state
         case embedurl = "embedUrl"
         case openurl = "openUrl"
+    }
+}
+
+public struct SessionEventAncestors: Codable, Sendable {
+    public let ancestorsessions: [SessionRow]
+    public let ancestorsessionrefs: [SessionAncestorRef]?
+
+    public init(
+        ancestorsessions: [SessionRow],
+        ancestorsessionrefs: [SessionAncestorRef]? = nil)
+    {
+        self.ancestorsessions = ancestorsessions
+        self.ancestorsessionrefs = ancestorsessionrefs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ancestorsessions = "ancestorSessions"
+        case ancestorsessionrefs = "ancestorSessionRefs"
     }
 }
 
@@ -15337,6 +15583,7 @@ public struct SessionRow: Codable, Sendable {
     public let activitysummary: SessionActivitySummary?
     public let updatedat: AnyCodable?
     public let snapshotat: Double?
+    public let ancestorrevision: String?
     public let hiddenfrominvolvingme: Bool?
     public let archived: Bool?
     public let archivedat: Double?
@@ -15430,6 +15677,7 @@ public struct SessionRow: Codable, Sendable {
         activitysummary: SessionActivitySummary? = nil,
         updatedat: AnyCodable? = nil,
         snapshotat: Double? = nil,
+        ancestorrevision: String? = nil,
         hiddenfrominvolvingme: Bool? = nil,
         archived: Bool? = nil,
         archivedat: Double? = nil,
@@ -15522,6 +15770,7 @@ public struct SessionRow: Codable, Sendable {
         self.activitysummary = activitysummary
         self.updatedat = updatedat
         self.snapshotat = snapshotat
+        self.ancestorrevision = ancestorrevision
         self.hiddenfrominvolvingme = hiddenfrominvolvingme
         self.archived = archived
         self.archivedat = archivedat
@@ -15616,6 +15865,7 @@ public struct SessionRow: Codable, Sendable {
         case activitysummary = "activitySummary"
         case updatedat = "updatedAt"
         case snapshotat = "snapshotAt"
+        case ancestorrevision = "ancestorRevision"
         case hiddenfrominvolvingme = "hiddenFromInvolvingMe"
         case archived
         case archivedat = "archivedAt"

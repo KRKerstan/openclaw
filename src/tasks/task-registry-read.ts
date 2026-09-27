@@ -1,5 +1,5 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { createSqliteLifecycleAggregateError } from "../infra/sqlite-coordinator.js";
+import { createSqliteLifecycleAggregateError } from "../infra/sqlite-lifecycle-errors.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.types.js";
 import { isTaskFlowCancellationPending } from "./task-cancellation-state.js";
@@ -255,6 +255,14 @@ export function createTaskRegistryReadPreparation() {
     }
     return prepareTaskRegistryRead(owner);
   };
+}
+
+/** Maintenance joins a fresh event fence per batch without waiting for unrelated publication. */
+export function createTaskRegistryMaintenanceReadPreparation() {
+  const context = captureOpenClawStateWorkerContext();
+  const store = getTaskRegistryStore();
+  return async (): Promise<TaskRegistryRead | undefined> =>
+    prepareTaskRegistryRead(await prepareTaskRegistryReadOwner(context, store));
 }
 
 export async function prepareTaskRegistryRead(

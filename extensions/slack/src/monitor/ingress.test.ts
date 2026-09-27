@@ -299,7 +299,6 @@ describe("Slack durable ingress", () => {
 
       const receiving = receive(createReceiverEvent("Ev-ack-order", ack));
       try {
-        // Await acknowledgement entry while still surfacing failed or missing admission.
         await Promise.race([ackStarted.promise, receiving]);
         expect(ack).toHaveBeenCalledTimes(1);
         expect(processEvent).not.toHaveBeenCalled();
